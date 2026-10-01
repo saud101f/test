@@ -7,6 +7,8 @@ Nothing supplied was modified, flashed, deployed or contacted. Operational ident
 
 **How to read confidence labels.** *Proven* = follows from source code/primary documentation plus the logs, or reproduced on the host. *Likely* = best fit to evidence, not excluded alternatives. *Hypothesis* = plausible, needs a named measurement. *Unknown* = evidence absent. Host tests/compilation are **not** hardware validation; no hardware test was run for this review.
 
+> **UPDATE 2 (evidence 13, second delivery) — read [`TLS_UPLOAD_FAILURE_ADDENDUM.md`](TLS_UPLOAD_FAILURE_ADDENDUM.md) first.** Sources are unchanged; log 13 shows 90 min of flap-free BLE (0 disconnects/invalid, same 80/120/160 ms) **while the upload failed 23 times, 0 verified, 17 queued**. Consequences for this review: (1) BLE churn is *not* required for the TLS failure — §4 F4 hypotheses H-T1/H-T2 are demoted; (2) new confirmed invariant: every failure (15/15 in log 13, 35/40 in log 09) is a `stage=body` write blocked **5–7 records (2560/3072/3584 B) into a 4096-B window**, never at `window-ack`; (3) **Likely cause: heap starvation of lwIP/Wi-Fi TX buffers during TLS** (all lwIP buffers are `malloc`ed; largest free block 0.45–3.8 kB while ACTIVE; `errno=11` = lwIP `ERR_MEM→ERR_WOULDBLOCK`); post-failure heap (~48 kB) is printed after the core freed the TLS context and is meaningless; (4) with ≈1–2 %/window stall hazard and restart-from-zero, files > ~1 MB essentially cannot complete → **resumable chunks (SFU3) are the smallest change that makes the system work**; (5) the single best next test is now **HT-12** (instrumented window/heap A/B), not HT-01; (6) Sheep-03 failure is better explained by a *backlog-burst trap* than by interval collisions (F5). Where this banner conflicts with text below, the banner wins.
+
 ---
 
 ## 1. Executive summary
@@ -18,7 +20,7 @@ Nothing supplied was modified, flashed, deployed or contacted. Operational ident
 | **Works** (evidence) | Durable commit→checkpoint→ACK ordering: 798 injected crash runs (399 syscall points × clean/torn; real `CsvStore.h` compiled on host) → 0 lost, 0 duplicated acknowledged batches; fragment assembler = reference model on 200 000 fuzzed streams; server: TLS verification on, token compare constant-time, temp-file + exclusive-link publish, SHA-256 + CSV validation, 10/10 host tests pass; v1.3 three-collar steady state for the ~4 min logged (0 disconnects/overflow); MG24 01/02/03 sketches are functionally identical. |
 | **Fails / proven defects** | Upload < capture rate (measured 5.5 kB/s mean vs 8.89 kB/s generated); same oldest file retried forever (121 attempts, others starve); pre-auth single-slot DoS on the server (reproduced); first-boot torn checkpoint halts collection permanently (reproduced, fix verified on host); SD fault = permanent halt with no self-recovery or remote signal; diagnostic `code=48` is a socket fd, not an error. |
 | **Unknown** | Why Sheep-03 loses links (supervision timeout 0x208) only when ≥2 links are up; why TLS writes stall after 2.5–3.5 kB; actual RTT, packet loss, average SD commit time, heap behaviour beyond minutes, flashed MG24 revisions, real-data compressibility. |
-| **Single best next test** | **HT-01** — upload the stuck 9.85 MB file with the collars *physically off* (no BLE load), `ss -ti` sampling on the VM. It splits "network/TLS/heap" from "BLE coexistence", yields the true TLS+Wi-Fi throughput ceiling that every enhancement decision depends on, needs no code change (v1.3 already has `collars none` / `uploads on`) and puts no data at risk (SD files are copied first). |
+| **Smallest next change / test** | **Change (needs owner approval, not applied):** T0 instrumentation (heap ring + writability poll + abort-before-core-stop) with runtime `window`/`nodelay` switches, then **T1 resumable chunked upload**. **Test: HT-12** — window 4096/2048/1024 × NoDelay × heap guard with the failure-instant heap captured; pair it with the VM journal/`ss -ti`. HT-01 (collars off) is demoted: under both leading hypotheses it would fail again, BLE already being exonerated by log 13. |
 
 **Top findings** (details §4):
 
@@ -27,8 +29,8 @@ Nothing supplied was modified, flashed, deployed or contacted. Operational ident
 | F1 | P1 | Upload throughput cannot keep up with capture; every retry also re-hashes the whole file and restarts from byte 0 | Proven (arithmetic + logs) |
 | F2 | P1 | `chooseFile()` always returns the oldest unsent file → one failing file starves the queue | Proven (code + log) |
 | F3 | P1 | No retention/alarm: SD and VM fill in ~6 weeks; SD-full stops ACKs → collar data loss within 55 s | Proven (arithmetic) / Likely (exact dates) |
-| F4 | P1 | TLS stall is the 15 s *no-progress* write timeout inside the core, not a TLS/alloc error; cause of the stall is open | Proven (mechanism) / Hypothesis (cause) |
-| F5 | P1 | Sheep-03 supervision timeouts: pairwise (needs another link), same collar firmware, harmonic intervals 80/120/160 ms, Wi-Fi + BLE + TLS all pinned to core 0 | Hypothesis (ranked, §5.2) |
+| F4 | P1 | TLS stall = the core's 15 s *no-progress* write timeout; blocked write is always 5–7 records into a 4096-B window; leading cause heap starvation of lwIP/Wi-Fi TX | Proven (mechanism, invariant) / **Likely** (cause) — addendum |
+| F5 | P1 | Sheep-03 supervision timeouts (not reproduced in log 13: 90 min clean): pairwise (needs another link), same collar firmware, harmonic intervals 80/120/160 ms, Wi-Fi + BLE + TLS all pinned to core 0 | Hypothesis (ranked, §5.2) |
 | F6 | P2 | Heap during TLS is 6–17 kB with largest free block 0.6–7 kB; idle largest block shrinks 55→35 kB over hours | Proven (log) / Hypothesis (causal link) |
 | F7 | P2 | `busy` flag taken before authentication → unauthenticated TLS client blocks all uploads | Proven (host repro) |
 | F8 | P2 | SD fault is terminal until manual reboot; only visible on serial | Proven (code) |
@@ -278,4 +280,4 @@ BLE+SD+Wi-Fi idle: sustained (hours, logs 08 for 01/02; ~4 min for all three in 
 
 **Evidence gaps — smallest additional measurement** (details in HARDWARE_TEST_PLAN): VM `ss -ti` + short pcap of one failing/passing upload; ESP32 timing/`errno`/heap-min/largest-block per window and BLE RSSI/`getConnInfo`/PHY/DLE per link; collar-side disconnect reason and firmware hash print; histogram (avg/p99/max) of `append()` time; `openssl x509 -enddate` of the server certificate; one real hour CSV (or 1 000 rows) for compression; the date the 80/120/160 ms experiment was introduced.
 
-**Single best next test: HT-01** (§1).
+**Smallest next change/test: T0 instrumentation → HT-12** (see addendum §4–5); T1 (resume) is the smallest change that makes completion certain.

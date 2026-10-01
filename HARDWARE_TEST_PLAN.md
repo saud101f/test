@@ -19,7 +19,9 @@ Standard post-processing: `python review_tests/evidence/evidence_analysis.py`-st
 | ID | Question | Needs | Duration | Blocks |
 |---|---|---|---|---|
 | **HT-00** | What exactly is deployed? | v1.3 | 1 h | all |
-| **HT-01** | What does Wi-Fi+TLS+SD achieve with **no BLE load**? *(single best next test)* | v1.3 | 1–2 h | E3/E5/E6/E7 priorities, hardware decision |
+| HT-01 | What does Wi-Fi+TLS+SD achieve with **no BLE load**? *(demoted after evidence 13: BLE already exonerated; still useful for a clean ceiling)* | v1.3 | 1–2 h | — |
+| **HT-12** | Is the stall memory-bound? window × NoDelay × heap guard, heap captured at the failure instant *(single best next test)* | T0 build (owner-approved flash) | 3–4 h | T1/T2/T4 |
+| HT-13 | Does a PSRAM board remove the stall? | WROVER/S3 board | 2 h | T4b |
 | HT-02 | Is three-collar BLE stable for hours (uploads off)? | v1.3 | 4 h | F5 |
 | HT-03 | Does concurrent BLE+upload hold (current firmware)? | v1.3 (+E0) | 8 h | F4/F6 |
 | HT-04 | Which factor fixes Sheep-03: pair, interval, core, hardware? | E1/E2 | 2 days | F5 |
@@ -31,7 +33,21 @@ Standard post-processing: `python review_tests/evidence/evidence_analysis.py`-st
 | HT-10 | Throughput/backlog acceptance after E3,E5–E7 | those builds | 2 days | F1 |
 | HT-11 | Security & lifecycle checks (dry-run/test instance) | VM owner | 2 h | F7/F9 |
 
-Suggested order: **HT-00 → HT-01 → HT-02 → (HT-04 if HT-02 fails) → HT-03 → HT-05 → E3/E4 builds → HT-06/07/08 → E5–E7 → HT-10 → HT-09 → HT-11 (in parallel with E9)**.
+Suggested order (revised): **HT-00 → HT-12 → (HT-13) → T1 build → HT-10; HT-01 optional → HT-02 → (HT-04 if HT-02 fails) → HT-03 → HT-05 → E3/E4 builds → HT-06/07/08 → E5–E7 → HT-10 → HT-09 → HT-11 (in parallel with E9)**.
+
+---
+
+## HT-12 Memory-bound stall A/B *(T0 instrumented build; flash needs owner approval)* — **single best next test**
+
+**Why.** Evidence 13: all failures are `stage=body` writes blocked 5–7 records into a 4096-B window, `errno=11`, 15–25 s after the last progress print, with BLE flap-free; leading cause = lwIP/Wi-Fi TX allocation failure while TLS leaves a 0.45–3.8 kB largest block (addendum §3). This test confirms or refutes it and finds the smallest in-flight bound that works, without touching BLE/SD code.
+**Setup.** All three collars on (production-like), fresh boot, serial timestamp logger, VM `ss` sampler + journal. Queue holds the 9.85 MB and 0.97 MB files. T0 prints, per failure: 32-sample ring of `(ms, free, largest)` before each write, `heap_caps_get_minimum_free_size`, `SO_ERROR`, writability time, TLS version/cipher. Runtime switches: `window 4096|2048|1024`, `nodelay on|off`, `guard on|off` (wait for `largest_free ≥ 3 kB`, ≤2 s).
+**Matrix (randomised, ≥ 45 min or ≥ 1 500 windows per cell):** (1) 4096/nodelay off/guard off = control; (2) 4096/on/off; (3) 2048/on/off; (4) 1024/on/off; (5) 4096/on/guard on; (6) 2048/on/guard on.
+**Measurements.** Failures per 1 000 windows, window index and ring contents at each failure, rate per 10 s, `ss` rtt/retrans, BLE `disconnects/invalid`, `saved_batches` rate and `max_save_ms` (must be unchanged vs control).
+**Acceptance / decision.** *Memory-bound confirmed* if ring shows `largest_free` < ≈1.5 kB at the stall and a cell reaches **0 failures in ≥ 3 000 windows** with rate ≥ 5 kB/s → adopt that cell (T2) and proceed to T1; *refuted* if failures persist at the control rate in every cell or the ring shows ≥ 3 kB free → inspect `ss`/pcap for loss, check installed `sdkconfig` (addendum §5). **BLE/SD guard (all cells):** 0 disconnects, 0 invalid, 0 overflow, commit p99 < 300 ms; any regression aborts the cell.
+**Data to return:** serial log, VM `ss`/journal, T0 dumps, the installed core's `sdkconfig` lines listed in addendum §5.
+
+## HT-13 PSRAM board *(only if HT-12 confirms memory starvation)*
+Same firmware on an ESP32-WROVER/S3-N8R8 with PSRAM enabled; check `heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)` during TLS (expect ≥ 20 kB) and run the HT-12 control cell for ≥ 3 000 windows. **Acceptance:** 0 failures, ≥ 10 kB/s, BLE/SD guards as above.
 
 ---
 
@@ -40,7 +56,7 @@ Suggested order: **HT-00 → HT-01 → HT-02 → (HT-04 if HT-02 fails) → HT-0
 **Procedure.** (1) Copy SD (rule 1). (2) Record ESP32 build ID, `status`, free SD space, queue (`queued_files`), file sizes. (3) For each collar record the build/hash; if the 01/02 image cannot print its address, label boards physically and note which log came from which (log 12 is unlabeled in the evidence). (4) Owner (VM): `systemctl status sheep-files`, `df -h`, last 50 journal lines, `openssl x509 -in <server.crt> -noout -enddate -dates` (read-only), disk usage of `hourly-files`. (5) From the laptop on the same Wi-Fi: 200 pings (or `tcping`) to the VM address → min/avg/p95/loss; note mesh node/AP the ESP32 is on.
 **Acceptance.** All items recorded with no gaps. Outputs feed RTT (REVIEW §5.7), certificate end date (F9) and SD/VM capacity days (F3).
 
-## HT-01 TLS/Wi-Fi ceiling without BLE *(v1.3 as shipped)* — **single best next test**
+## HT-01 TLS/Wi-Fi ceiling without BLE *(v1.3 as shipped)* — demoted (see HT-12)
 
 **Why.** F1/F4: the upload is slower than capture and stalls after 2.5–3.5 kB; the unknown is whether BLE coexistence, the network path, or heap is responsible. With the collars off, BLE is removed completely; only Wi-Fi + TLS + SD remain. The result is the throughput ceiling the plan depends on and it needs no code change.
 
@@ -79,6 +95,7 @@ Interpretation aids: `retrans > 0` with high `rtt` ⇒ loss; `bytes_received` fl
 Randomise order; 1 h per cell, repeat each failing/borderline cell once; uploads off (so TLS cannot confound), then repeat the best cell with uploads on.
 | Cell | Variable | Predicts if H1 (harmonic/scheduling) true |
 |---|---|---|
+| e | **induced backlog**: power one collar off 45 s, restore, with uploads on and off | tests the backlog-burst trap (addendum §6): flapping only while the restored collar drains |
 | a1 | pair 01+03 only (`collars 13`) at P0 | fails |
 | a2 | pair 02+03 | less likely to fail (480 ms commensurate) |
 | a3 | pair 01+02 | stable |

@@ -11,6 +11,21 @@ Companion to [`REVIEW.md`](REVIEW.md) (finding IDs F1–F11) and [`HARDWARE_TEST
 5. Do not pool runs: each hardware run starts from a fresh boot, records bootIDs, and is judged on its own (HT-00).
 6. Decide with measurements: steps are grouped into phases with explicit gates; a later phase starts only if its gate is met.
 
+
+## 0b. Re-prioritisation after evidence 13 (supersedes the ordering in §1 where they differ)
+
+New confirmed facts: BLE stable for 90 min while TLS failed 23×; every failure is a `stage=body` write blocked 5–7 records into a 4096-B window; per-attempt rate 0.6–4.4 kB/s; hazard ≈1–2 %/window ⇒ files > ~1 MB cannot complete without resume (details and file:line evidence in [`TLS_UPLOAD_FAILURE_ADDENDUM.md`](TLS_UPLOAD_FAILURE_ADDENDUM.md)). Revised order (none applied; BLE reception and SD commit/ACK paths untouched by all of it):
+
+| Order | Step | Smallest form | Protects BLE/SD? |
+|---|---|---|---|
+| 1 | **T0 = E0 (TLS part)**: heap ring before each write, `select()` writability poll, abort-before-core-stop at 8 s, TLS version/cipher print, runtime `window`/`nodelay`/`writechunk` | additive in `HourlyRuntime.h`/`Diagnostics.h`, upload task only | yes — no change to `storageTask`, `CsvStore`, collar tasks |
+| 2 | **T1 = E6**: resumable chunked SFU3 + digest sidecar + 6 s no-progress timeout | server new magic (SFU1/2 kept) + uploader | yes |
+| 3 | **T2**: window 2048/1024, heap guard, `setNoDelay(true)` | constants/guard in uploader + server chunk constant | yes |
+| 4 | T3 = E3: retry fairness | uploader only | yes |
+| 5 | T4: heap headroom (PSRAM module or custom IDF build) — only if HT-12/HT-13 confirm memory starvation | hardware/build | yes |
+| 6 | T5 = E7: CSV-preserving compact transport | both | yes |
+E1/E2 (BLE interval/core-pinning experiments) drop in priority: log 13 shows BLE stable at the current parameters; keep E2's "pin uploader to core 1" only as an optional HT-12 cell because it could disturb BLE timing differently. E4(a,b) (first-boot fix, SD-fault restart) remain independent and low-risk.
+
 ## 1. Order of work (summary)
 
 | # | Step | Phase | Size | Risk | Closes | Gate / verified by |
